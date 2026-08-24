@@ -68,6 +68,26 @@ log_warn()  { echo -e "${C_YELLOW}⚠${C_RESET} $*" >&2 ; }
 log_error() { echo -e "${C_RED}✗${C_RESET} $*" >&2 ; }
 log_dim()   { echo -e "${C_DIM}$*${C_RESET}" ; }
 
+# Warn (once, at the human-facing entry points) if the terminal doesn't look
+# like it supports 256-color or truecolor — the menu/statusline/pane-border
+# styling all assume at least 256-color, and will render as garbled escape
+# sequences or wrong colors otherwise. Not fatal, just a heads-up.
+check_color_support() {
+  [ -n "${NO_COLOR:-}" ] && return 0
+  [ -t 1 ] || [ -t 2 ] || return 0
+  case "${COLORTERM:-}" in
+    truecolor|24bit) return 0 ;;
+  esac
+  local colors colors_str="unknown"
+  colors="$(tput colors 2>/dev/null || echo "")"
+  if [ -n "$colors" ] && [ "$colors" -ge 256 ] 2>/dev/null; then
+    return 0
+  fi
+  [ -n "$colors" ] && colors_str="$colors"
+  log_warn "Terminal may not support 256-color/truecolor (TERM=${TERM:-unset}, tput colors=$colors_str) — the menu and statusline colors may look wrong."
+  log_dim "  Try setting TERM=xterm-256color, or use a terminal/SSH client with truecolor support."
+}
+
 require_ssh() {
   if ! command -v ssh >/dev/null 2>&1; then
     log_error "ssh is not installed on this machine."
@@ -146,7 +166,9 @@ ensure_tmux_conf_file() {
     'set -g focus-events on' \
     'set -g set-clipboard on' \
     'set -g default-terminal "tmux-256color"' \
-    'set -as terminal-features ",gnome*:RGB"'; do
+    'set -as terminal-features ",gnome*:RGB"' \
+    'set -g set-titles on' \
+    'set -g set-titles-string "#{session_name}: #{pane_current_command}#{?@scpt_remote, (#{@scpt_remote}),}"'; do
     if [ -f "$tmux_conf" ] && ! grep -qF "$line" "$tmux_conf" 2>/dev/null; then
       # Ensure we can write without breaking perms
       if [ -w "$tmux_conf" ] || [ ! -e "$tmux_conf" ]; then
@@ -166,6 +188,12 @@ ensure_tmux_basics() {
   if ! tmux show-options -g terminal-features 2>/dev/null | grep -q "gnome\*:RGB"; then
     tmux set-option -as terminal-features ",gnome*:RGB" 2>/dev/null || true
   fi
+  # Terminal title tracks the ACTIVE pane (updates on every pane/window
+  # switch, since these format variables are current-pane-relative) —
+  # otherwise it's stuck on whatever the terminal emulator set it to when
+  # scpt.sh was first launched (e.g. "bash scpt.sh").
+  tmux set-option -g set-titles on 2>/dev/null || true
+  tmux set-option -g set-titles-string "#{session_name}: #{pane_current_command}#{?@scpt_remote, (#{@scpt_remote}),}" 2>/dev/null || true
   # Minimal statusline: session name, clock, and a cyan dot next to any
   # window running an scpt-managed remote session so it's obvious which
   # windows are local vs. remote.
@@ -503,6 +531,7 @@ transfer_here() {
 
 # ── the tmux menu (called via prefix+c) ─────────────────────────────
 build_menu() {
+  check_color_support
   require_tmux || { exec "${SHELL:-bash}"; return 1; }
   if [ -z "${TMUX:-}" ]; then
     log_error "Not inside tmux — cannot show menu. Launching tmux..."
@@ -614,6 +643,7 @@ uninstall_binding() {
 }
 
 install_binding() {
+  check_color_support
   require_tmux || return 1
   local force="${1:-}" # --yes to skip prompt, --no to skip binding current server
   if [ -z "${TMUX:-}" ]; then

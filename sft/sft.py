@@ -1262,8 +1262,6 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
     when invoked via --to-alias/--to-docker directly, without a pane).
     Uses rsync for all except docker cp exception.
     """
-    require("rsync")
-    require("ssh")
     src_path = _pane_current_path(src_pane) if src_pane else ""
     if not src_path:
         src_path = os.getcwd()
@@ -1315,6 +1313,23 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
     # Prepare ssh target if needed and not already
     if to_alias and target is None:
         target = resolve_target_for_alias(to_alias)
+
+    # Tool requirements depend on the destination — a docker-only host
+    # with no ssh/rsync installed can still drop files into a LOCAL
+    # container (docker cp needs neither); only remote destinations
+    # (ssh alias, or docker on a remote host, which stages via rsync
+    # over ssh first) need rsync/ssh at all.
+    if to_docker:
+        if docker_host:
+            require("rsync")
+            require("ssh")
+        else:
+            require("docker")
+    elif target:
+        require("rsync")
+        require("ssh")
+    else:
+        require("rsync")
 
     # One transfer function per destination kind — the full-pane splash/
     # progress loop below is identical either way.
