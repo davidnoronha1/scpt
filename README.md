@@ -63,7 +63,11 @@ Installs:
 - `prefix+R` — reconnects the current pane in place if its connection dropped.
 - `prefix+f` — fzf-powered window/pane picker (falls back to `choose-tree`).
 - Right-click — copies the current selection directly if there is one,
-  otherwise shows a small menu (Paste/Split/Zoom/Kill).
+  otherwise shows a small menu (Paste/Split/Zoom/Kill). Panes running
+  `claude`/`opencode`/`gemini`/`nvim` (or anything else that's grabbed mouse
+  reporting) always get the menu instead — those apps handle their own
+  mouse-drag selection and clipboard, so tmux stays out of the way instead of
+  copying a second time.
 
 Remote tmux is used by default for persistence when scpt is installed on the
 remote host — set `SCPT_REMOTE_TMUX=0` to force plain ssh instead (no remote
