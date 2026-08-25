@@ -177,10 +177,11 @@ ensure_tmux_basics() {
   tmux set-option -g mode-style "fg=colour255,bg=colour24" 2>/dev/null || true
   # Releasing a mouse-drag selection freezes it (stays highlighted, stays in
   # copy-mode) instead of tmux's default auto-copy-and-exit — so you can
-  # select, then right-click → Copy from the context menu as a deliberate
-  # step, like a regular terminal, rather than the drag itself copying.
-  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X stop-selection 2>/dev/null || true
-  tmux bind-key -T copy-mode MouseDragEnd1Pane send-keys -X stop-selection 2>/dev/null || true
+  # select, then right-click → Copy. For apps that handle their own mouse
+  # (claude/opencode/gemini/nvim + mouse_any_flag) we clear the tmux
+  # selection entirely to avoid any double/triple copy (app + tmux + terminal).
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection" 2>/dev/null || true
+  tmux bind-key -T copy-mode MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection" 2>/dev/null || true
   # Claude Code doesn't trust COLORTERM/terminal-overrides when it sees
   # $TMUX set — it downgrades to 256-color output unless this opt-in flag
   # is present, regardless of whether tmux is actually passing truecolor
@@ -206,15 +207,21 @@ ensure_tmux_basics() {
   tmux set-option -g status-justify left 2>/dev/null || true
   tmux set-option -g status-style "bg=colour235,fg=colour245" 2>/dev/null || true
   tmux set-option -g status-left-length 20 2>/dev/null || true
-  tmux set-option -g status-right-length 20 2>/dev/null || true
+  tmux set-option -g status-right-length 80 2>/dev/null || true
   tmux set-option -g status-left "#[fg=colour39,bold] #S " 2>/dev/null || true
-  tmux set-option -g status-right "#[fg=colour245] %H:%M " 2>/dev/null || true
-  tmux set-option -g window-status-format "#[fg=colour245] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} " 2>/dev/null || true
-  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]" 2>/dev/null || true
+  tmux set-option -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M " 2>/dev/null || true
+  tmux set-option -g window-status-format "#[fg=colour245] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} " 2>/dev/null || true
+  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]" 2>/dev/null || true
   tmux set-option -g window-status-separator "" 2>/dev/null || true
   tmux set-option -g pane-border-style "fg=colour240" 2>/dev/null || true
   tmux set-option -g pane-active-border-style "fg=colour39" 2>/dev/null || true
   tmux set-option -g pane-border-lines single 2>/dev/null || true
+  # Popups (fzf/sft) — disable tmux's own popup/menu border to avoid double
+  # with fzf's --border=rounded and sft's Python rounded box. No-op on 3.2a.
+  tmux set-option -g popup-border-lines none 2>/dev/null || true
+  tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+  tmux set-option -g menu-border-lines none 2>/dev/null || true
+  tmux set-option -g menu-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
 }
 
 # Prints the ~/.tmux.conf lines equivalent to ensure_tmux_basics, for anyone
@@ -238,10 +245,9 @@ set -s escape-time 10
 set -as terminal-overrides ",*:Tc"
 # Softer copy-mode selection highlight — tmux's default is bg=yellow,fg=black.
 set -g mode-style "fg=colour255,bg=colour24"
-# Releasing a mouse-drag selection freezes it (stays highlighted, stays in
-# copy-mode) instead of tmux's default auto-copy-and-exit.
-bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X stop-selection
-bind-key -T copy-mode MouseDragEnd1Pane send-keys -X stop-selection
+# Releasing a mouse-drag freezes — but for claude/opencode/gemini/nvim (or mouse_any_flag) clear tmux selection to avoid double/triple copy
+bind-key -T copy-mode-vi MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection"
+bind-key -T copy-mode MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection"
 set -g set-titles on
 set -g set-titles-string "#{session_name}: #{pane_current_command}#{?@scpt_remote, (#{@scpt_remote}),}"
 set -g status on
@@ -250,15 +256,20 @@ set -g status-position bottom
 set -g status-justify left
 set -g status-style "bg=colour235,fg=colour245"
 set -g status-left-length 20
-set -g status-right-length 20
+set -g status-right-length 80
 set -g status-left "#[fg=colour39,bold] #S "
-set -g status-right "#[fg=colour245] %H:%M "
-set -g window-status-format "#[fg=colour245] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} "
-set -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]"
+set -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M "
+set -g window-status-format "#[fg=colour245] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} "
+set -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]"
 set -g window-status-separator ""
 set -g pane-border-style "fg=colour240"
 set -g pane-active-border-style "fg=colour39"
 set -g pane-border-lines single
+# Popups — disable tmux popup/menu border to avoid double with fzf/sft
+set -g popup-border-lines none
+set -g popup-border-style "fg=colour240,bg=colour235"
+set -g menu-border-lines none
+set -g menu-border-style "fg=colour240,bg=colour235"
 # --- end scpt.sh ---
 EOF
 }
@@ -568,8 +579,15 @@ transfer_here() {
   fi
 
   if [ "$probe_rc" = 0 ]; then
-    # Full-pane popup, closes itself when sft exits (-E).
-    tmux display-popup -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null
+    # Full-pane popup, closes itself when sft exits (-E). Disable tmux popup border
+    # so only sft's own rounded border (sft.py) shows — avoids double white border.
+    tmux set-option -g popup-border-lines none 2>/dev/null || true
+    tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+    if tmux display-popup -B -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null; then
+      :
+    else
+      tmux display-popup -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null
+    fi
   else
     log_warn "display-popup unavailable (tmux too old, or no attached client), opening transfer in a new window instead: ${probe_err:-no error output}"
     tmux new-window "bash -c '$qcmd; echo; echo \"[sft] done — Enter to close\"; read -r _; exec \${SHELL:-bash}'" 2>/dev/null || exec "${sft_bin[@]}" --from-pane "$pane" --to-pane "$pane"
@@ -588,45 +606,42 @@ fzf_pane_picker() {
     tmux choose-tree -Zw 2>/dev/null || tmux choose-tree -Z 2>/dev/null || tmux choose-tree 2>/dev/null
     return 0
   fi
+  local sep=$'\x1f'
   local panes_raw
-  panes_raw="$(tmux list-panes -a -F "#{session_name}|#{window_index}|#{window_name}|#{pane_index}|#{pane_id}|#{pane_current_command}|#{pane_current_path}|#{@scpt_remote}|#{pane_active}|#{window_active}|#{pane_title}" 2>/dev/null)"
+  panes_raw="$(tmux list-panes -a -F "#{session_name}${sep}#{window_index}${sep}#{window_name}${sep}#{pane_index}${sep}#{pane_id}${sep}#{pane_current_command}${sep}#{pane_current_path}${sep}#{@scpt_remote}${sep}#{pane_active}${sep}#{window_active}${sep}#{pane_title}${sep}#{@scpt_remote_type}" 2>/dev/null)"
   if [ -z "$panes_raw" ]; then
     tmux display-message "scpt: no panes" 2>/dev/null
     return 0
   fi
-  # Build sortable lines: display|pane_id|target (use | — not tab — so empty @scpt_remote is preserved; tab is IFS whitespace and collapses empty fields)
+  # Build sortable lines: title|path|type|cmd|pane_id|target (display hides sess:win.pane as requested; use unit-separator so titles containing | are safe)
   local raw_lines
-  raw_lines="$(printf "%s\n" "$panes_raw" | while IFS='|' read -r sess widx wname pidx pid cmd path remote pactive wactive title; do
+  raw_lines="$(printf "%s\n" "$panes_raw" | while IFS=$'\x1f' read -r sess widx wname pidx pid cmd path remote pactive wactive title rtype; do
     [ -z "$sess" ] && continue
-    [ -z "$remote" ] && remote="local"
-    local wflag=""; [ "$wactive" = "1" ] && wflag="*"
-    local pflag=""; [ "$pactive" = "1" ] && pflag="●"
-    local disp
-    disp="$(printf "%s:%s.%s  %s%s  %s  %s  %s %s" "$sess" "$widx" "$pidx" "$wname" "$wflag" "$cmd" "$path" "$remote" "$pflag")"
+    local ptype="${rtype:-local}"
+    [ -z "$ptype" ] && ptype="local"
+    local dtitle
     if [ -n "$title" ] && [ "$title" != "$cmd" ] && [ "$title" != "bash" ] && [ "$title" != "zsh" ]; then
-      disp="$disp  [$title]"
+      dtitle="$title"
+    else
+      dtitle="—"
     fi
     local target
     target="$(printf "%s:%s.%s" "$sess" "$widx" "$pidx")"
-    printf "%s|%s|%s|%s|%s|%s\n" "$disp" "$pid" "$target" "$sess" "$widx" "$pidx"
-  done | sort -t '|' -k4,4 -k5,5n -k6,6n)"
+    printf "%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s\n" "$dtitle" "$path" "$ptype" "$cmd" "$pid" "$target" "$sess" "$widx" "$pidx"
+  done | sort -t "$sep" -k7,7 -k8,8n -k9,9n)"
 
   if [ -z "$raw_lines" ]; then
     tmux display-message "scpt: no panes to pick" 2>/dev/null
     return 0
   fi
 
-  # Colorize for --ansi (cyan sess:win.pane, yellow window, green cmd, dim path, cyan remote)
-  local cyan="\033[36m" yellow="\033[33m" green="\033[32m" dim="\033[2m" reset="\033[0m"
+  # Colorize for --ansi: title yellow, path dim, type cyan, process green (title may contain spaces, so build directly, no awk split)
+  local cyan=$'\033[36m' yellow=$'\033[33m' green=$'\033[32m' dim=$'\033[2m' reset=$'\033[0m'
   local colored_lines
-  colored_lines="$(printf "%s\n" "$raw_lines" | while IFS='|' read -r disp pid target _sess _widx _pidx; do
-    [ -z "$disp" ] && continue
+  colored_lines="$(printf "%s\n" "$raw_lines" | while IFS=$'\x1f' read -r dtitle path ptype cmd pid target _sess _widx _pidx; do
+    [ -z "$pid" ] && continue
     local cdisp
-    cdisp="$(printf "%s" "$disp" | awk -v c="$cyan" -v y="$yellow" -v g="$green" -v d="$dim" -v r="$reset" '{
-      sessWin=$1; win=$2; cmd=$3; path=$4; remote=$5
-      rest=""; for(i=6;i<=NF;i++) rest=rest " " $i
-      printf "%s%s%s %s%s%s %s%s%s %s%s%s %s%s%s%s", c, sessWin, r, y, win, r, g, cmd, r, d, path, r, c, remote, r, rest
-    }')"
+    cdisp="${yellow}${dtitle}${reset}  ${dim}${path}${reset}  ${cyan}${ptype}${reset}  ${green}${cmd}${reset}"
     printf "%s\t%s\t%s\n" "$cdisp" "$pid" "$target"
   done)"
 
@@ -639,7 +654,7 @@ fzf_pane_picker() {
   local preview_cmd='tmux capture-pane -pe -t {2} 2>/dev/null | tail -n 200; echo ""; echo "─── {2} → {3} ───"; tmux display -p -t {2} "#{pane_current_command}  #{pane_current_path}  #{?@scpt_remote,#{@scpt_remote},local}" 2>/dev/null'
 
   local selected
-  selected="$(printf "%s\n" "$colored_lines" | fzf --ansi --reverse --border --height 100% --prompt "pane> " --pointer "▶" --marker "✓" --header "$header" --delimiter $'\t' --with-nth 1 --nth 1 --preview "$preview_cmd" --preview-window "right:55%:nowrap:border-rounded" --bind "ctrl-/:toggle-preview,esc:abort" --info inline --layout reverse)"
+  selected="$(printf "%s\n" "$colored_lines" | fzf --ansi --reverse --border=rounded --height 100% --prompt "pane> " --pointer "▶" --marker "✓" --header "$header" --delimiter $'\t' --with-nth 1 --nth 1 --preview "$preview_cmd" --preview-window "right:55%:nowrap" --bind "ctrl-/:toggle-preview,esc:abort" --info inline --layout reverse)"
   local rc=$?
   if [ $rc -ne 0 ] || [ -z "$selected" ]; then
     return 0
@@ -673,7 +688,14 @@ picker_popup() {
   local probe_rc=0 probe_err=""
   probe_err="$(tmux display-popup -E -w 1 -h 1 -x C -y C true 2>&1)" || probe_rc=$?
   if [ "$probe_rc" = 0 ]; then
-    tmux display-popup -E -w 90% -h 80% -x C -y C "bash '$SCRIPT' --picker" 2>/dev/null
+    # Disable tmux popup border so only fzf's --border=rounded shows — avoids double white border
+    tmux set-option -g popup-border-lines none 2>/dev/null || true
+    tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+    if tmux display-popup -B -E -w 90% -h 80% -x C -y C "bash '$SCRIPT' --picker" 2>/dev/null; then
+      :
+    else
+      tmux display-popup -E -w 90% -h 80% -x C -y C "bash '$SCRIPT' --picker" 2>/dev/null
+    fi
   else
     tmux new-window "bash '$SCRIPT' --picker; exec \${SHELL:-bash}" 2>/dev/null || bash "$SCRIPT" --picker
   fi
@@ -753,14 +775,9 @@ build_menu() {
   local docker_tmp
   docker_tmp="$(list_docker_containers "$docker_ctx")"
   if [ -n "$docker_tmp" ]; then
-    local first_docker=1
     while IFS=$'\t' read -r cname cimage cid; do
       [ -z "$cname" ] && continue
       [ "$i" -gt 9 ] && break # keep menu keys single-digit
-      if [ "$first_docker" -eq 1 ]; then
-        args+=("#[fg=colour245,dim]─ docker containers on $docker_ctx_label ─" "" "")
-        first_docker=0
-      fi
       local dlabel="#[fg=blue]󰡨 #[fg=default]$cname #[fg=colour245,dim]($cimage)"
       args+=("$dlabel" "$i" "new-window \"bash '$SCRIPT' --connect-docker '$cname' '$docker_ctx'\"")
       i=$((i + 1))
@@ -1321,6 +1338,13 @@ smart_split() { # h or v — called via tmux bind
   ridf="$(tmux display -p "#{@scpt_remote_idf}" 2>/dev/null || echo "")"
   dockerhost="$(tmux display -p "#{@scpt_docker_host}" 2>/dev/null || echo "")"
   [ "$remote" = "" ] && remote=""
+  # Preserve cwd for new pane (local and remote/docker — local cwd before ssh)
+  local cur_path
+  cur_path="$(tmux display -p "#{pane_current_path}" 2>/dev/null || echo "")"
+  local split_c=""
+  if [ -n "$cur_path" ] && [ -d "$cur_path" ]; then
+    split_c="-c \"$cur_path\""
+  fi
   if [ -n "$remote" ] && [ "$rtype" = "docker" ]; then
     # If the container lives on a remote host we got there over ssh, so the
     # local descendant process is ssh, not docker — check accordingly.
@@ -1332,9 +1356,9 @@ smart_split() { # h or v — called via tmux bind
     fi
     if [ "$docker_active" = "1" ]; then
       if [ "$dir" = "h" ]; then
-        tmux split-window -h "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
+        eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
       else
-        tmux split-window -v "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
+        eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
       fi
       return 0
     fi
@@ -1342,31 +1366,40 @@ smart_split() { # h or v — called via tmux bind
   if [ -n "$remote" ] && [ -n "$rtype" ] && is_ssh_pane_active; then
     if [ "$rtype" = "alias" ]; then
       if [ "$dir" = "h" ]; then
-        tmux split-window -h "bash '$SCRIPT' --connect '$remote'"
+        eval tmux split-window -h $split_c "bash '$SCRIPT' --connect '$remote'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect '$remote'"
       else
-        tmux split-window -v "bash '$SCRIPT' --connect '$remote'"
+        eval tmux split-window -v $split_c "bash '$SCRIPT' --connect '$remote'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect '$remote'"
       fi
     else
       local usr hn
       usr="${remote%%@*}"; hn="${remote#*@}"
       if [ -n "$ridf" ]; then
         if [ "$dir" = "h" ]; then
-          tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
+          eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
         else
-          tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
+          eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
         fi
       else
         if [ "$dir" = "h" ]; then
-          tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
+          eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
         else
-          tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
+          eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
         fi
       fi
     fi
     return 0
   fi
-  if [ "$dir" = "h" ]; then tmux split-window -h
-  else tmux split-window -v
+  # Local pane — preserve cwd
+  if [ -n "$split_c" ]; then
+    if [ "$dir" = "h" ]; then
+      eval tmux split-window -h $split_c 2>/dev/null || tmux split-window -h
+    else
+      eval tmux split-window -v $split_c 2>/dev/null || tmux split-window -v
+    fi
+  else
+    if [ "$dir" = "h" ]; then tmux split-window -h
+    else tmux split-window -v
+    fi
   fi
 }
 
@@ -1423,25 +1456,11 @@ install_smart_splits() {
   tmux bind-key -T prefix R run-shell "bash '$SCRIPT' --reload-pane" 2>/dev/null || true
   # prefix+f picker: fzf window→pane tree (falls back to choose-tree if fzf missing)
   tmux bind-key -T prefix f run-shell "bash '$SCRIPT' --picker-popup" 2>/dev/null || true
-  # Right-click: copy directly if there's a selection, else show a small
-  # menu (Paste/Split/Zoom/Kill). Copy is NOT a menu item — tmux 3.2a's
-  # display-menu does not reliably run an item's command when it's chosen
-  # via a mouse click (verified: even a trivial external command bound to
-  # a menu item silently never fires on mouse selection, though the same
-  # command works fine as a direct binding, and works via the item's
-  # keyboard shortcut) — so Copy has to be the direct action of the click
-  # itself, not something you click a second time inside a menu.
-  # copy-pipe-and-cancel with no external command copies into tmux's own
-  # buffer; `set-clipboard on` (ensure_tmux_basics) is what pushes that to
-  # the real system clipboard via OSC 52 — no xclip/wl-copy dependency,
-  # works over ssh too, since the text already lives in tmux's local
-  # buffer regardless of which pane/host it was selected from.
-  # Triggered on mouse-UP (release), not down — binding to MouseDown3Pane
-  # means the release tail-end of that same click lands right after
-  # anything opened on the press and gets consumed by it. Also unbind any
-  # stale MouseDown3Pane from an earlier install of this binding.
+  # Right-click: copy if tmux selection present, but ignore panes where
+  # the app handles its own mouse/clipboard (claude/opencode/gemini/nvim + mouse_any_flag)
+  # to avoid double/triple copy (3x in CC, 2x in OC). Otherwise show menu.
   tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
-  tmux bind-key -T root MouseUp3Pane if-shell -F "#{selection_present}" \
+  tmux bind-key -T root MouseUp3Pane if-shell -F "#{&&:#{selection_present},#{?#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}},0,1}}" \
     "send-keys -X copy-pipe-and-cancel" \
     "display-menu -t= -x M -y M -T \"#[align=centre]Pane\" \"Paste\" p \"paste-buffer\" \"\" \"Split Horizontal\" h \"split-window -h\" \"Split Vertical\" v \"split-window -v\" \"\" \"#{?window_zoomed_flag,Unzoom,Zoom}\" z \"resize-pane -Z\" \"Kill Pane\" x \"kill-pane\"" \
     2>/dev/null || true
