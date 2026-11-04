@@ -210,9 +210,14 @@ ensure_tmux_basics() {
   tmux set-option -g status-right-length 80 2>/dev/null || true
   tmux set-option -g status-left "#[fg=colour39,bold] #S " 2>/dev/null || true
   tmux set-option -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M " 2>/dev/null || true
-  tmux set-option -g window-status-format "#[fg=colour245] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} " 2>/dev/null || true
-  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]" 2>/dev/null || true
-  tmux set-option -g window-status-separator "" 2>/dev/null || true
+  # Alerts use text colors so remote bells/activity cannot mimic selection.
+  tmux set-option -g window-status-style "none,fg=colour245,bg=colour235" 2>/dev/null || true
+  tmux set-option -g window-status-current-style "none,fg=colour235,bg=colour245,bold" 2>/dev/null || true
+  tmux set-option -g window-status-activity-style "noreverse,fg=colour39,bold" 2>/dev/null || true
+  tmux set-option -g window-status-bell-style "noreverse,fg=colour214,bold" 2>/dev/null || true
+  tmux set-option -g window-status-format "#[default] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]" 2>/dev/null || true
+  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold,noreverse] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]" 2>/dev/null || true
+  tmux set-option -g window-status-separator " " 2>/dev/null || true
   tmux set-option -g pane-border-style "fg=colour240" 2>/dev/null || true
   tmux set-option -g pane-active-border-style "fg=colour39" 2>/dev/null || true
   tmux set-option -g pane-border-lines single 2>/dev/null || true
@@ -259,9 +264,13 @@ set -g status-left-length 20
 set -g status-right-length 80
 set -g status-left "#[fg=colour39,bold] #S "
 set -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M "
-set -g window-status-format "#[fg=colour245] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} "
-set -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]"
-set -g window-status-separator ""
+set -g window-status-style "none,fg=colour245,bg=colour235"
+set -g window-status-current-style "none,fg=colour235,bg=colour245,bold"
+set -g window-status-activity-style "noreverse,fg=colour39,bold"
+set -g window-status-bell-style "noreverse,fg=colour214,bold"
+set -g window-status-format "#[default] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]"
+set -g window-status-current-format "#[fg=colour235,bg=colour245,bold,noreverse] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]"
+set -g window-status-separator " "
 set -g pane-border-style "fg=colour240"
 set -g pane-active-border-style "fg=colour39"
 set -g pane-border-lines single
