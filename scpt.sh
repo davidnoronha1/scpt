@@ -9,6 +9,7 @@
 # Run inside tmux to show the menu (no binding by default):
 #     ./scpt.sh              # shows menu in current tmux session
 #     ./scpt.sh --bind       # installs prefix+c → menu (this server only)
+#     ./scpt.sh --menu h/v   # choose a host for a side-by-side/top-bottom split
 #     ./scpt.sh --unbind     # restores prefix+c → new-window
 # Outside tmux it auto-launches tmux session 'main' and binds there.
 #
@@ -509,6 +510,19 @@ build_menu() {
     install_binding --yes
     return
   fi
+  local layout="${1:-window}"
+  local launch="new-window" heading="New Window" pane
+  case "$layout" in
+    h|v)
+      pane="$(tmux display -p '#{pane_id}' 2>/dev/null)" || return 1
+      [ -n "$pane" ] || return 1
+      launch="split-window -$layout -t $pane"
+      if [ "$layout" = h ]; then heading="Split Side by Side"
+      else heading="Split Top / Bottom"; fi
+      ;;
+    window) ;;
+    *) log_error "Unknown menu layout: $layout"; return 1 ;;
+  esac
   # Clean, colorized menu — uses tmux #[...] styles, not shell colors.
   # Every section below is gated on actually having content to show — a
   # section header/divider is only appended once the first real item for
@@ -517,13 +531,13 @@ build_menu() {
   hosts_tmp="$(list_hosts)"
   local count=0
   [ -n "$hosts_tmp" ] && count="$(echo "$hosts_tmp" | grep -c .)"
-  local title="#[align=centre,fg=cyan,bold] ✦  New Window  #[fg=colour245,dim]— $THIS_HOST "
+  local title="#[align=centre,fg=cyan,bold] ✦  $heading  #[fg=colour245,dim]— $THIS_HOST "
   if [ "$count" -gt 0 ]; then
     title="$title #[fg=colour245]($count remote$( [ "$count" -eq 1 ] || echo "s"))"
   fi
   local args=(-T "$title" -x C -y C)
   # Local machine
-  args+=("#[fg=green]󰣀  This machine #[fg=colour245]($THIS_HOST)" l "new-window")
+  args+=("#[fg=green]󰣀  This machine #[fg=colour245]($THIS_HOST)" l "$launch")
   local i=1
   if [ -n "$hosts_tmp" ]; then
     while IFS=$'\t' read -r alias hn _usr idf; do
@@ -533,7 +547,7 @@ build_menu() {
       [ -n "$idf" ] && tag="$(basename "$idf")"
       # icon + alias → host dim tag
       local label="#[fg=colour39]󰒋 #[fg=default]$alias #[fg=colour245]→ $hn #[fg=colour240,dim][$tag]"
-      args+=("$label" "$i" "new-window \"bash '$SCRIPT' --connect '$alias'\"")
+      args+=("$label" "$i" "$launch \"bash '$SCRIPT' --connect '$alias'\"")
       i=$((i + 1))
     done <<< "$hosts_tmp"
   fi
@@ -559,7 +573,7 @@ build_menu() {
       fi
       local alabel="#[fg=colour141]↻ #[fg=default]$userhost #[fg=colour245,dim](active, reuse)"
       # Use ephemeral connect so ControlMaster is reused, no Host needed
-      args+=("$alabel" "$i" "new-window \"bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'\"")
+      args+=("$alabel" "$i" "$launch \"bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'\"")
       i=$((i + 1))
       active_added=1
     done <<< "$active_tmp"
@@ -583,14 +597,14 @@ build_menu() {
         first_docker=0
       fi
       local dlabel="#[fg=blue]󰡨 #[fg=default]$cname #[fg=colour245,dim]($cimage)"
-      args+=("$dlabel" "$i" "new-window \"bash '$SCRIPT' --connect-docker '$cname' '$docker_ctx'\"")
+      args+=("$dlabel" "$i" "$launch \"bash '$SCRIPT' --connect-docker '$cname' '$docker_ctx'\"")
       i=$((i + 1))
     done <<< "$docker_tmp"
   fi
   # Actions
-  args+=("#[fg=colour141]󰐕  Add new remote #[fg=colour245]— user@host" a "new-window \"bash '$SCRIPT' --add\"")
+  args+=("#[fg=colour141]󰐕  Add new remote #[fg=colour245]— user@host" a "$launch \"bash '$SCRIPT' --add\"")
   if command -v nmap >/dev/null 2>&1; then
-    args+=("#[fg=magenta]󰤨  Scan network #[fg=colour245](nmap)" n "new-window \"bash '$SCRIPT' --scan\"")
+    args+=("#[fg=magenta]󰤨  Scan network #[fg=colour245](nmap)" n "$launch \"bash '$SCRIPT' --scan\"")
   fi
   # Footer hint when there are no saved remotes at all (unselectable entry)
   if [ "$count" -eq 0 ]; then
@@ -1217,6 +1231,9 @@ install_smart_splits() {
   # Falls back to normal splits when not in an scpt ssh pane.
   tmux bind-key -T prefix % run-shell "bash '$SCRIPT' --smart-split h" 2>/dev/null || true
   tmux bind-key -T prefix '"' run-shell "bash '$SCRIPT' --smart-split v" 2>/dev/null || true
+  # Menu splits choose a destination instead of inheriting the current host.
+  tmux bind-key -T prefix '|' run-shell "bash '$SCRIPT' --menu h" 2>/dev/null || true
+  tmux bind-key -T prefix '_' run-shell "bash '$SCRIPT' --menu v" 2>/dev/null || true
   # prefix+c smart: in ssh pane → new ssh window, else menu
   tmux bind-key -T prefix c run-shell "bash '$SCRIPT' --smart-new-window" 2>/dev/null || true
   tmux bind-key -T prefix C run-shell "bash '$SCRIPT' --menu" 2>/dev/null || true
@@ -1230,6 +1247,8 @@ uninstall_smart_splits() {
   require_tmux || return 1
   tmux unbind-key -T prefix % 2>/dev/null || true
   tmux unbind-key -T prefix '"' 2>/dev/null || true
+  tmux unbind-key -T prefix '|' 2>/dev/null || true
+  tmux unbind-key -T prefix '_' 2>/dev/null || true
   tmux unbind-key -T prefix T 2>/dev/null || true
   tmux unbind-key -T prefix R 2>/dev/null || true
   tmux bind-key -T prefix % split-window -h 2>/dev/null || true
@@ -1479,7 +1498,7 @@ scan_network() {
 
 # ── entry point ───────────────────────────────────────────────────────
 case "${1:-}" in
---menu) build_menu ;;
+--menu) build_menu "${2:-window}" ;;
 --transfer-here) transfer_here ;;
 --list|-l|--remotes) list_all ;;
 --connect) connect "${2:-}" ;;
@@ -1507,17 +1526,18 @@ case "${1:-}" in
 --help|-h)
   echo -e "${C_BOLD}Usage:${C_RESET} $SCRIPT [${C_CYAN}--menu|--connect <alias>|--add|--scan|--bind|--unbind${C_RESET}]"
   echo -e "  ${C_BOLD}(no args)${C_RESET}  Inside tmux: ${C_GREEN}show menu${C_RESET} for this session; outside tmux: launch tmux+bind"
-  echo -e "  ${C_CYAN}--menu${C_RESET}      Show menu (used by tmux binding)"
+  echo -e "  ${C_CYAN}--menu${C_RESET}      Show menu; --menu h/v selects a side-by-side/top-bottom split"
   echo -e "  ${C_CYAN}-l, --list${C_RESET}    List tmux sessions, docker containers, saved remotes & active connections"
   echo -e "  ${C_CYAN}--transfer-here${C_RESET}  Full-pane file transfer (prefix+T): drop a file or fzf, sent to wherever this pane is connected"
   echo -e "  ${C_CYAN}--add${C_RESET}       Add new remote — prompts for ${C_BOLD}user@host${C_RESET}, probes server, asks auth"
   echo -e "  ${C_CYAN}--scan${C_RESET}      Scan subnet with nmap to pick a host"
   echo -e "  ${C_CYAN}--connect-docker${C_RESET} <name>  Attach to a running docker container (also listed in the menu)"
   echo -e "  ${C_CYAN}--bind${C_RESET}      Install ${C_BOLD}prefix+c${C_RESET} smart + ${C_BOLD}prefix+T${C_RESET} transfer + ${C_BOLD}prefix+R${C_RESET} reload + ${C_BOLD}prefix+% / prefix+\"${C_RESET} multiplex ${C_DIM}(ssh pane→new ssh pane via ControlMaster)${C_RESET}"
-  echo -e "  ${C_CYAN}--unbind${C_RESET}    Restore ${C_BOLD}prefix+c/T/R/%/\"${C_RESET} to defaults"
+  echo -e "  ${C_CYAN}--unbind${C_RESET}    Restore ${C_BOLD}prefix+c/T/R/%/|/_/\"${C_RESET} to defaults"
   echo -e "  ${C_CYAN}--basics${C_RESET}    Apply statusbar/colors/mouse etc to the ${C_BOLD}current${C_RESET} tmux server ${C_DIM}(must be run inside tmux)${C_RESET}"
   echo -e "  ${C_CYAN}--help${C_RESET}      Show this help"
   echo ""
+  echo -e "${C_DIM}Choose a host for a new split: prefix+| side by side, prefix+_ top/bottom.${C_RESET}"
   echo -e "${C_DIM}Multiplexing: after ssh via menu, any split from that pane auto-ssh's the same host${C_RESET}"
   echo -e "${C_DIM}  (ControlMaster reuses the TCP connection — no re-auth). Local splits stay local.${C_RESET}"
   echo -e "${C_DIM}Tip: to auto-bind new tmux servers, add to ~/.bashrc:${C_RESET}"

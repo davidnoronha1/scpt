@@ -19,6 +19,10 @@ Target resolution:
 Transfer: rsync --info=progress2 (required). Uses ControlMaster for
 auth reuse. docker cp is the only exception for docker targets.
 
+Destination directory:
+  sft <host> <FILE...> --dest /remote/directory
+                 copy into a specified destination directory.
+
 Bootstrap (-b):
   sft -b [host]  copy sft itself to the remote's ~/.local/bin so the
                  remote can run sft natively. Uses the same ControlMaster
@@ -33,6 +37,7 @@ Host storage fallback:
   and the ssh target automatically uses user@host when the alias lives
   only in the fallback (so no ~/.ssh/config alias resolution needed).
 """
+from collections import deque
 import glob
 import json
 import os
@@ -44,6 +49,7 @@ import subprocess
 import sys
 import termios
 import time
+import textwrap
 import tty
 from pathlib import Path
 
@@ -57,6 +63,7 @@ _FALLBACK_BASE = Path(os.environ.get("XDG_CONFIG_HOME", str(HOME / ".config")))
 FALLBACK_SSH_CONFIG = _FALLBACK_BASE / "scpt" / "hosts"
 
 IS_TTY = sys.stdout.isatty()
+_TRANSFER_ERRORS = deque(maxlen=20)
 
 
 def _c(code):
@@ -82,10 +89,14 @@ def log_ok(msg):
 
 
 def log_warn(msg):
+    if _FULLPANE:
+        _TRANSFER_ERRORS.append(str(msg))
     print(f"{C_YELLOW}⚠{C_RESET} {msg}", file=sys.stderr)
 
 
 def log_error(msg):
+    if _FULLPANE:
+        _TRANSFER_ERRORS.append(str(msg))
     print(f"{C_RED}✗{C_RESET} {msg}", file=sys.stderr)
 
 
@@ -865,6 +876,28 @@ def _fullpane_done(name, dst_label):
     time.sleep(0.6)
 
 
+def _fullpane_failed(name, dst_label):
+    cols, rows = _term_size()
+    width = max(10, cols - 4)
+    details = list(_TRANSFER_ERRORS) or ["Transfer returned failure without diagnostic output."]
+    lines = []
+    for detail in details:
+        for line in detail.splitlines():
+            lines.extend(textwrap.wrap(line, width=width) or [""])
+    available = max(1, rows - 9)
+    if len(lines) > available:
+        lines = ["… earlier output omitted …"] + lines[-max(1, available - 1):]
+    _fullpane_box(
+        "✗ transfer failed",
+        [name, f"destination: {dst_label}", ""] + lines,
+        footer="Enter to continue • Ctrl-C to close",
+    )
+    try:
+        input()
+    except EOFError:
+        pass
+
+
 def _read_one_char():
     """Raw single-keypress read (no echo, no line buffering). Returns
     (char, more_pending) — more_pending is True if more input was already
@@ -1058,24 +1091,14 @@ def _exists_docker_remote(target: "Target", container, dst_dir, name):
 
 
 # ── rsync (only) transfers ──────────────────────────────────────────
-def transfer_rsync(src: str, target: Target, dst_path: str = "", dedupe: bool = True) -> bool:
-    """Rsync src -> target:dst_path. If dst_path empty, uses ~/ (legacy).
-    dst_path is taken from pane's current path when run via --to-pane.
-    """
-    require("rsync")
-    name = os.path.basename(src.rstrip("/")) or src
-    total_size = path_size(src)
-    dst_dir = dst_path.rstrip("/") + "/" if dst_path else "~/"
-    if dedupe:
-        name, warn = _dedupe_name(lambda n: _exists_remote(target, dst_path, n), name)
-        _warn_collision(warn)
-    dst_spec = f"{target.ssh}:{dst_dir}{name}"
-    args = ["rsync", "-a", "--info=progress2", "--outbuf=L", "-e", _ssh_ctl_opt(target)]
-    if os.path.isdir(src):
-        args.append("-r")
-    args += [src, dst_spec]
-
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+def _run_rsync(args, name, total_size):
+    """Stream progress while retaining diagnostic output on failure."""
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except OSError as exc:
+        log_error(f"Could not start rsync: {exc}")
+        return False
+    diagnostics = deque(maxlen=20)
     buf = ""
     while True:
         chunk = proc.stdout.read(256)
@@ -1090,14 +1113,40 @@ def transfer_rsync(src: str, target: Target, dst_path: str = "", dedupe: bool = 
             m = RSYNC_PROGRESS_RE.search(line)
             if m:
                 draw_bar(name, int(m.group(1)), m.group(2), m.group(3), total_size)
+            elif line.strip():
+                diagnostics.append(line.strip())
+    if buf.strip():
+        diagnostics.append(buf.strip())
+    proc.stdout.close()
     proc.wait()
     if proc.returncode == 0:
         draw_bar(name, 100, "", "done", total_size)
         print()
         return True
-    # print last error for diagnostics
-    log_warn(f"rsync failed for {name} (rc={proc.returncode})")
+    log_error(f"rsync failed for {name} (exit code {proc.returncode})")
+    for line in diagnostics:
+        log_error(line)
     return False
+
+
+def transfer_rsync(src: str, target: Target, dst_path: str = "", dedupe: bool = True) -> bool:
+    """Rsync src -> target:dst_path. If dst_path empty, uses ~/ (legacy).
+    dst_path is taken from pane's current path when run via --to-pane.
+    """
+    require("rsync")
+    name = os.path.basename(src.rstrip("/")) or src
+    total_size = path_size(src)
+    dst_dir = dst_path.rstrip("/") + "/" if dst_path else "~/"
+    if dedupe:
+        name, warn = _dedupe_name(lambda n: _exists_remote(target, dst_path, n), name)
+        _warn_collision(warn)
+    dst_spec = f"{target.ssh}:{dst_dir}{name}"
+    args = ["rsync", "-a", "--protect-args", "--info=progress2", "--outbuf=L", "-e", _ssh_ctl_opt(target)]
+    if os.path.isdir(src):
+        args.append("-r")
+    args += [src, dst_spec]
+
+    return _run_rsync(args, name, total_size)
 
 
 def transfer_local_rsync(src: str, dst_dir: str) -> bool:
@@ -1114,28 +1163,7 @@ def transfer_local_rsync(src: str, dst_dir: str) -> bool:
     if os.path.isdir(src):
         # -a already handles dirs, but keep
         pass
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    buf = ""
-    while True:
-        chunk = proc.stdout.read(256)
-        if not chunk:
-            break
-        buf += chunk
-        while "\r" in buf or "\n" in buf:
-            sep_idx = min((i for i in (buf.find("\r"), buf.find("\n")) if i != -1), default=-1)
-            if sep_idx == -1:
-                break
-            line, buf = buf[:sep_idx], buf[sep_idx + 1:]
-            m = RSYNC_PROGRESS_RE.search(line)
-            if m:
-                draw_bar(name, int(m.group(1)), m.group(2), m.group(3), total_size)
-    proc.wait()
-    if proc.returncode == 0:
-        draw_bar(name, 100, "", "done", total_size)
-        print()
-        return True
-    log_warn(f"rsync local failed (rc={proc.returncode})")
-    return False
+    return _run_rsync(args, name, total_size)
 
 
 def transfer_docker(src: str, container: str, dst_dir: str = "", rhost: str = "") -> bool:
@@ -1255,7 +1283,7 @@ def _pick_files_fzf(src_dir: str):
         return []
 
 
-def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_docker: str = "", docker_host: str = ""):
+def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_docker: str = "", docker_host: str = "", destination=None):
     """Full-pane transfer for prefix+T: always src_pane == to_pane (the
     current pane calls this on itself) — destination is whatever this pane
     is already connected to. Dest path is that pane's current path (or ~/
@@ -1312,6 +1340,10 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
         log_error("No destination resolved")
         sys.exit(1)
 
+    if destination is not None:
+        dst_path = destination if (target or to_alias or to_docker) else os.path.expanduser(destination)
+        dst_label = f"{to_docker or to_alias or 'local'}:{dst_path}"
+
     # Prepare ssh target if needed and not already
     if to_alias and target is None:
         target = resolve_target_for_alias(to_alias)
@@ -1339,8 +1371,16 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
                 break
             for f in files:
                 name = os.path.basename(f.rstrip("/")) or f
-                do_transfer(f)
-                _fullpane_done(name, dst_label)
+                _TRANSFER_ERRORS.clear()
+                try:
+                    ok = do_transfer(f)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    log_error(str(exc))
+                    ok = False
+                if ok:
+                    _fullpane_done(name, dst_label)
+                else:
+                    _fullpane_failed(name, dst_label)
     except KeyboardInterrupt:
         pass
     finally:
@@ -1348,7 +1388,6 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
         _alt_screen_exit()
         if target:
             cleanup(target)
-        return
 
 
 def print_usage():
@@ -1358,6 +1397,8 @@ def print_usage():
     print(f"  {C_BOLD}(no args){C_RESET}              Interactive file drop copier (default)")
     print(f"  {C_CYAN}<alias> <FILE...>{C_RESET}      Copy FILE(s) to remote alias's ~/ (supports key, keyfile, password)")
     print(f"  {C_CYAN}<alias>{C_RESET}                Interactive copier to that alias (no pick)")
+    print(f"  {C_CYAN}-d, --dest <PATH>{C_RESET}  Destination directory on the target (default: ~/; pane mode: pane path)")
+    print(f"  Example: {prog} myserver /local/file --dest /remote/directory")
     print(f"  {C_CYAN}-l, --list{C_RESET}             List remote aliases and active connections")
     print(f"  {C_CYAN}--from-pane <id> --to-pane <id>{C_RESET}  Full-pane transfer (prefix+T): dest = that pane's own connection")
     print(f"  {C_CYAN}--to-alias <alias>{C_RESET}     Pane-aware to saved remote (rare)")
@@ -1368,7 +1409,8 @@ def print_usage():
     print(f"  {C_CYAN}-h, --help{C_RESET}             Show this help")
     print("")
     print(f"{C_DIM}Transfer:{C_RESET} rsync required (no scp fallback). Dest path = target pane's current path")
-    print(f"  when invoked via --from-pane/--to-pane (prefix+T). Direct `sft <alias> <FILE>` still uses ~/ .")
+    print(f"  when invoked via --from-pane/--to-pane (prefix+T); otherwise defaults to ~/.")
+    print(f"  --dest overrides the destination directory in either mode.")
     print(f"  docker is the only exception (docker cp). fzf picks files, drag-drop still works.")
     print(f"{C_DIM}Auth:{C_RESET} 3 methods — SSH key/agent (default), keyfile via IdentityFile (e.g. AWS .pem),")
     print(f"  and password (ssh prompts, then ControlMaster reuses). All work with `sft <alias> <FILE>`")
@@ -1390,6 +1432,7 @@ def main():
     to_alias = ""
     to_docker = ""
     docker_host = ""
+    destination = None
     positionals = []
     unknown = None
     args = sys.argv[1:]
@@ -1402,6 +1445,12 @@ def main():
             list_mode = True
         elif a in ("-h", "--help"):
             show_help = True
+        elif a in ("-d", "--dest"):
+            if i + 1 < len(args) and args[i + 1]:
+                destination = args[i + 1]; i += 1
+            else:
+                log_error(f"{a} requires a destination directory")
+                sys.exit(1)
         elif a == "--from-pane":
             if i + 1 < len(args):
                 from_pane = args[i+1]; i+=1
@@ -1466,7 +1515,7 @@ def main():
             except Exception:
                 from_pane = ""
         try:
-            _run_pane_transfer(from_pane, to_pane, to_alias, to_docker, docker_host)
+            _run_pane_transfer(from_pane, to_pane, to_alias, to_docker, docker_host, destination)
             sys.exit(0)
         except KeyboardInterrupt:
             print()
@@ -1509,8 +1558,8 @@ def main():
                         log_error(f"Not found: {f}")
                         failed = True
                         continue
-                    transfer_one(fp, target)
-                    # transfer_one logs success/failure; track failure if needed
+                    if not transfer_one(fp, target, destination or ""):
+                        failed = True
                 sys.exit(1 if failed else 0)
             except KeyboardInterrupt:
                 print()
@@ -1548,7 +1597,7 @@ def main():
                 target = resolve_target_for_alias(alias)
                 print()
                 log_info("Ready. Drag a file or folder into this window and press enter.")
-                log_dim(f"  (q or Ctrl-C to quit — connected to {target.label})")
+                log_dim(f"  (q or Ctrl-C to quit — destination {target.label}:{destination or '~/'})")
                 print()
                 while True:
                     try:
@@ -1567,7 +1616,7 @@ def main():
                         dropped = [line]
                     for f in dropped:
                         if f:
-                            transfer_one(os.path.expanduser(f), target)
+                            transfer_one(os.path.expanduser(f), target, destination or "")
                 log_info("Bye.")
                 sys.exit(0)
             except KeyboardInterrupt:
@@ -1641,7 +1690,7 @@ def main():
         target = resolve_target()
         print()
         log_info("Ready. Drag a file or folder into this window and press enter.")
-        log_dim(f"  (q or Ctrl-C to quit — connected to {target.label})")
+        log_dim(f"  (q or Ctrl-C to quit — destination {target.label}:{destination or '~/'})")
         print()
 
         while True:
@@ -1661,7 +1710,7 @@ def main():
                 dropped = [line]
             for f in dropped:
                 if f:
-                    transfer_one(os.path.expanduser(f), target)
+                    transfer_one(os.path.expanduser(f), target, destination or "")
         log_info("Bye.")
     except KeyboardInterrupt:
         print()
