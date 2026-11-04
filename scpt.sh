@@ -275,12 +275,15 @@ set -g pane-border-style "fg=colour240"
 set -g pane-active-border-style "fg=colour39"
 set -g pane-border-lines single
 # Popups — disable tmux popup/menu border to avoid double with fzf/sft
-set -g popup-border-lines none
-set -g popup-border-style "fg=colour240,bg=colour235"
-set -g menu-border-lines none
-set -g menu-border-style "fg=colour240,bg=colour235"
+# (-q: these options need tmux >= 3.3; ignored silently on older versions)
+set -gq popup-border-lines none
+set -gq popup-border-style "fg=colour240,bg=colour235"
+set -gq menu-border-lines none
+set -gq menu-border-style "fg=colour240,bg=colour235"
 # --- end scpt.sh ---
 EOF
+  printf '%s\n' "bind-key -T prefix c run-shell \"bash '$SCRIPT' --smart-new-window\"" \
+    "bind-key -T prefix C run-shell \"bash '$SCRIPT' --menu\""
 }
 # Note: ensure_tmux_basics (statusbar/colors) is intentionally NOT auto-applied
 # here. It's only called when scpt creates a brand-new tmux session (i.e. run
@@ -1444,10 +1447,9 @@ smart_new_window() {
     fi
     return 0
   fi
-  # Not an active ssh/docker pane (plain local shell) — just open a normal
-  # local window here, same as tmux's default prefix+c. The menu is only
-  # for prefix+C now.
-  tmux new-window
+  # Not an active ssh/docker pane (plain local shell) — show the menu.
+  # Falls back to a plain local window if the menu can't be displayed.
+  build_menu || tmux new-window
 }
 
 install_smart_splits() {
