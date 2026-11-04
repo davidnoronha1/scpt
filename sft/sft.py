@@ -820,17 +820,29 @@ def _fullpane_clear():
 
 
 def _fullpane_render(lines, cols=None, rows=None):
-    """Clear and redraw the pane with `lines` vertically+horizontally centered."""
+    """Clear and redraw the pane with `lines` centered inside a rounded border."""
     if cols is None or rows is None:
         cols, rows = _term_size()
     _fullpane_clear()
-    top_pad = max(0, (rows - len(lines)) // 2)
-    out = ["\n"] * top_pad
+    # Rounded border around full-pane popup (nice, not double)
+    b = C_DIM  # border color
+    top = f"{b}╭{'─' * (cols - 2)}╮{C_RESET}"
+    bottom = f"{b}╰{'─' * (cols - 2)}╯{C_RESET}"
+    side = f"{b}│{C_RESET}"
+    inner_rows = max(0, rows - 2)
+    inner_cols = max(0, cols - 2)
+    top_pad = max(0, (inner_rows - len(lines)) // 2)
+    out = [top]
+    out += [f"{side}{' ' * inner_cols}{side}"] * top_pad
     for line in lines:
-        # strip ANSI color codes when measuring width for centering
         visible = re.sub(r"\033\[[0-9;]*m", "", line)
-        pad = max(0, (cols - len(visible)) // 2)
-        out.append(" " * pad + line)
+        pad = max(0, (inner_cols - len(visible)) // 2)
+        right_pad = max(0, inner_cols - len(visible) - pad)
+        out.append(f"{side}{' ' * pad}{line}{' ' * right_pad}{side}")
+    # fill remaining inner rows so bottom border stays at bottom
+    remaining = inner_rows - top_pad - len(lines)
+    out += [f"{side}{' ' * inner_cols}{side}"] * max(0, remaining)
+    out.append(bottom)
     sys.stdout.write("\n".join(out))
     sys.stdout.flush()
 
@@ -1290,8 +1302,6 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
     when invoked via --to-alias/--to-docker directly, without a pane).
     Uses rsync for all except docker cp exception.
     """
-    require("rsync")
-    require("ssh")
     src_path = _pane_current_path(src_pane) if src_pane else ""
     if not src_path:
         src_path = os.getcwd()
@@ -1347,6 +1357,23 @@ def _run_pane_transfer(src_pane: str, to_pane: str = "", to_alias: str = "", to_
     # Prepare ssh target if needed and not already
     if to_alias and target is None:
         target = resolve_target_for_alias(to_alias)
+
+    # Tool requirements depend on the destination — a docker-only host
+    # with no ssh/rsync installed can still drop files into a LOCAL
+    # container (docker cp needs neither); only remote destinations
+    # (ssh alias, or docker on a remote host, which stages via rsync
+    # over ssh first) need rsync/ssh at all.
+    if to_docker:
+        if docker_host:
+            require("rsync")
+            require("ssh")
+        else:
+            require("docker")
+    elif target:
+        require("rsync")
+        require("ssh")
+    else:
+        require("rsync")
 
     # One transfer function per destination kind — the full-pane splash/
     # progress loop below is identical either way.

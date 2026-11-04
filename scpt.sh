@@ -69,6 +69,26 @@ log_warn()  { echo -e "${C_YELLOW}⚠${C_RESET} $*" >&2 ; }
 log_error() { echo -e "${C_RED}✗${C_RESET} $*" >&2 ; }
 log_dim()   { echo -e "${C_DIM}$*${C_RESET}" ; }
 
+# Warn (once, at the human-facing entry points) if the terminal doesn't look
+# like it supports 256-color or truecolor — the menu/statusline/pane-border
+# styling all assume at least 256-color, and will render as garbled escape
+# sequences or wrong colors otherwise. Not fatal, just a heads-up.
+check_color_support() {
+  [ -n "${NO_COLOR:-}" ] && return 0
+  [ -t 1 ] || [ -t 2 ] || return 0
+  case "${COLORTERM:-}" in
+    truecolor|24bit) return 0 ;;
+  esac
+  local colors colors_str="unknown"
+  colors="$(tput colors 2>/dev/null || echo "")"
+  if [ -n "$colors" ] && [ "$colors" -ge 256 ] 2>/dev/null; then
+    return 0
+  fi
+  [ -n "$colors" ] && colors_str="$colors"
+  log_warn "Terminal may not support 256-color/truecolor (TERM=${TERM:-unset}, tput colors=$colors_str) — the menu and statusline colors may look wrong."
+  log_dim "  Try setting TERM=xterm-256color, or use a terminal/SSH client with truecolor support."
+}
+
 require_ssh() {
   if ! command -v ssh >/dev/null 2>&1; then
     log_error "ssh is not installed on this machine."
@@ -134,29 +154,11 @@ ensure_ssh_config() {
 ensure_ssh_config >/dev/null 2>&1 || true
 
 # ── ensure tmux basics + statusline (always on) ─────────────────────
-ensure_tmux_conf_file() {
-  local tmux_conf="$HOME/.tmux.conf"
-  local tmp
-  # Create file if missing (644, don't break perms)
-  if [ ! -e "$tmux_conf" ]; then
-    touch "$tmux_conf" 2>/dev/null && chmod 644 "$tmux_conf" 2>/dev/null || true
-  fi
-  # Only append if not already present (idempotent, respects existing user config)
-  for line in \
-    'set -g mouse on' \
-    'set -g focus-events on' \
-    'set -g set-clipboard on' \
-    'set -g default-terminal "tmux-256color"' \
-    'set -as terminal-features ",gnome*:RGB"'; do
-    if [ -f "$tmux_conf" ] && ! grep -qF "$line" "$tmux_conf" 2>/dev/null; then
-      # Ensure we can write without breaking perms
-      if [ -w "$tmux_conf" ] || [ ! -e "$tmux_conf" ]; then
-        printf "%s\n" "$line" >>"$tmux_conf" 2>/dev/null || true
-      fi
-    fi
-  done
-}
-
+# Deliberately does NOT write to ~/.tmux.conf: that file is sourced by every
+# tmux server on this machine, scpt-initiated or not, so persisting here
+# would leak scpt's mouse/color/keybinding opinions into unrelated tmux
+# usage. Everything below is applied live (tmux set-option) only to servers
+# scpt itself bootstraps/touches — see ensure_tmux_basics call sites.
 ensure_tmux_basics() {
   # Live settings for current tmux server (no file edit needed for immediate effect)
   # Use 2>/dev/null || true for older tmux versions that lack some options
@@ -164,9 +166,39 @@ ensure_tmux_basics() {
   tmux set-option -g focus-events on 2>/dev/null || true
   tmux set-option -g set-clipboard on 2>/dev/null || true
   tmux set-option -g default-terminal "tmux-256color" 2>/dev/null || true
-  if ! tmux show-options -g terminal-features 2>/dev/null | grep -q "gnome\*:RGB"; then
-    tmux set-option -as terminal-features ",gnome*:RGB" 2>/dev/null || true
+  tmux set-option -s escape-time 10 2>/dev/null || true
+  tmux set-option -g escape-time 10 2>/dev/null || true
+  # True colour: tmux-256color + *:Tc works on any tmux version and any
+  # outer terminal (gnome*:Tc would only match TERM=gnome*, which almost no
+  # terminal emulator — including GNOME Terminal itself — actually reports).
+  if ! tmux show-options -g terminal-overrides 2>/dev/null | grep -qF ",*:Tc"; then
+    tmux set-option -as terminal-overrides ",*:Tc" 2>/dev/null || true
   fi
+  # Softer copy-mode selection highlight — tmux's default is bg=yellow,fg=black.
+  tmux set-option -g mode-style "fg=colour255,bg=colour24" 2>/dev/null || true
+  # Releasing a mouse-drag selection freezes it (stays highlighted, stays in
+  # copy-mode) instead of tmux's default auto-copy-and-exit — so you can
+  # select, then right-click → Copy. For apps that handle their own mouse
+  # (claude/opencode/gemini/nvim + mouse_any_flag) we clear the tmux
+  # selection entirely to avoid any double/triple copy (app + tmux + terminal).
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection" 2>/dev/null || true
+  tmux bind-key -T copy-mode MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection" 2>/dev/null || true
+  # Claude Code doesn't trust COLORTERM/terminal-overrides when it sees
+  # $TMUX set — it downgrades to 256-color output unless this opt-in flag
+  # is present, regardless of whether tmux is actually passing truecolor
+  # through correctly. Only set it when the outer terminal (the one scpt
+  # was launched from, before tmux) actually declared truecolor support.
+  case "${COLORTERM:-}" in
+    truecolor|24bit)
+      tmux set-environment -g CLAUDE_CODE_TMUX_TRUECOLOR 1 2>/dev/null || true
+      ;;
+  esac
+  # Terminal title tracks the ACTIVE pane (updates on every pane/window
+  # switch, since these format variables are current-pane-relative) —
+  # otherwise it's stuck on whatever the terminal emulator set it to when
+  # scpt.sh was first launched (e.g. "bash scpt.sh").
+  tmux set-option -g set-titles on 2>/dev/null || true
+  tmux set-option -g set-titles-string "#{session_name}: #{pane_current_command}#{?@scpt_remote, (#{@scpt_remote}),}" 2>/dev/null || true
   # Minimal statusline: session name, clock, and a cyan dot next to any
   # window running an scpt-managed remote session so it's obvious which
   # windows are local vs. remote.
@@ -176,17 +208,83 @@ ensure_tmux_basics() {
   tmux set-option -g status-justify left 2>/dev/null || true
   tmux set-option -g status-style "bg=colour235,fg=colour245" 2>/dev/null || true
   tmux set-option -g status-left-length 20 2>/dev/null || true
-  tmux set-option -g status-right-length 20 2>/dev/null || true
+  tmux set-option -g status-right-length 80 2>/dev/null || true
   tmux set-option -g status-left "#[fg=colour39,bold] #S " 2>/dev/null || true
-  tmux set-option -g status-right "#[fg=colour245] %H:%M " 2>/dev/null || true
-  tmux set-option -g window-status-format "#[fg=colour245] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} " 2>/dev/null || true
-  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold] #I:#W#{?@scpt_remote,#[fg=colour39] ●,} #[fg=colour245,bg=colour235]" 2>/dev/null || true
-  tmux set-option -g window-status-separator "" 2>/dev/null || true
+  tmux set-option -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M " 2>/dev/null || true
+  # Alerts use text colors so remote bells/activity cannot mimic selection.
+  tmux set-option -g window-status-style "none,fg=colour245,bg=colour235" 2>/dev/null || true
+  tmux set-option -g window-status-current-style "none,fg=colour235,bg=colour245,bold" 2>/dev/null || true
+  tmux set-option -g window-status-activity-style "noreverse,fg=colour39,bold" 2>/dev/null || true
+  tmux set-option -g window-status-bell-style "noreverse,fg=colour214,bold" 2>/dev/null || true
+  tmux set-option -g window-status-format "#[default] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]" 2>/dev/null || true
+  tmux set-option -g window-status-current-format "#[fg=colour235,bg=colour245,bold,noreverse] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]" 2>/dev/null || true
+  tmux set-option -g window-status-separator " " 2>/dev/null || true
   tmux set-option -g pane-border-style "fg=colour240" 2>/dev/null || true
   tmux set-option -g pane-active-border-style "fg=colour39" 2>/dev/null || true
   tmux set-option -g pane-border-lines single 2>/dev/null || true
-  # Ensure conf file for future servers
-  ensure_tmux_conf_file 2>/dev/null || true
+  # Popups (fzf/sft) — disable tmux's own popup/menu border to avoid double
+  # with fzf's --border=rounded and sft's Python rounded box. No-op on 3.2a.
+  tmux set-option -g popup-border-lines none 2>/dev/null || true
+  tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+  tmux set-option -g menu-border-lines none 2>/dev/null || true
+  tmux set-option -g menu-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+}
+
+# Prints the ~/.tmux.conf lines equivalent to ensure_tmux_basics, for anyone
+# who wants scpt's mouse/color/copy-behavior opinions to survive even in
+# tmux servers scpt never touches. Kept as plain `set`/`bind-key` lines
+# (config-file syntax, no `tmux` prefix) so `--persist >> ~/.tmux.conf`
+# works directly. Deliberately excludes CLAUDE_CODE_TMUX_TRUECOLOR (only
+# correct when conditioned on the outer terminal's COLORTERM at attach
+# time, not a fixed line) — keep in sync with ensure_tmux_basics by hand.
+print_persist_config() {
+  cat <<'EOF'
+# --- scpt.sh: mouse/color/copy-behavior (from `scpt.sh --persist`) ---
+set -g mouse on
+set -g focus-events on
+set -g set-clipboard on
+set -g default-terminal "tmux-256color"
+set -s escape-time 10
+# True colour: *:Tc works on any tmux version and any outer terminal
+# (gnome*:Tc would only match TERM=gnome*, which almost no terminal
+# emulator — including GNOME Terminal itself — actually reports).
+set -as terminal-overrides ",*:Tc"
+# Softer copy-mode selection highlight — tmux's default is bg=yellow,fg=black.
+set -g mode-style "fg=colour255,bg=colour24"
+# Releasing a mouse-drag freezes — but for claude/opencode/gemini/nvim (or mouse_any_flag) clear tmux selection to avoid double/triple copy
+bind-key -T copy-mode-vi MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection"
+bind-key -T copy-mode MouseDragEnd1Pane if-shell -F "#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}}" "send-keys -X clear-selection" "send-keys -X stop-selection"
+set -g set-titles on
+set -g set-titles-string "#{session_name}: #{pane_current_command}#{?@scpt_remote, (#{@scpt_remote}),}"
+set -g status on
+set -g status-interval 5
+set -g status-position bottom
+set -g status-justify left
+set -g status-style "bg=colour235,fg=colour245"
+set -g status-left-length 20
+set -g status-right-length 80
+set -g status-left "#[fg=colour39,bold] #S "
+set -g status-right "#[fg=colour245]#{?pane_title,#{?#{!=:#{pane_title},#{pane_current_command}},#[fg=colour245] #{pane_title} #[fg=colour240]— ,},} %H:%M "
+set -g window-status-style "none,fg=colour245,bg=colour235"
+set -g window-status-current-style "none,fg=colour235,bg=colour245,bold"
+set -g window-status-activity-style "noreverse,fg=colour39,bold"
+set -g window-status-bell-style "noreverse,fg=colour214,bold"
+set -g window-status-format "#[default] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]"
+set -g window-status-current-format "#[fg=colour235,bg=colour245,bold,noreverse] #I:#{?#{&&:#{!=:#{pane_current_command},bash},#{!=:#{pane_current_command},zsh}},#{?#{==:#{pane_current_command},claude},✳,#{?#{==:#{pane_current_command},opencode},OC,#{?#{==:#{pane_current_command},gemini},✦,#{pane_current_command}}}}/#{b:pane_current_path},#{b:pane_current_path}}#{?@scpt_remote,#[fg=colour39] ●,} #[default]"
+set -g window-status-separator " "
+set -g pane-border-style "fg=colour240"
+set -g pane-active-border-style "fg=colour39"
+set -g pane-border-lines single
+# Popups — disable tmux popup/menu border to avoid double with fzf/sft
+# (-q: these options need tmux >= 3.3; ignored silently on older versions)
+set -gq popup-border-lines none
+set -gq popup-border-style "fg=colour240,bg=colour235"
+set -gq menu-border-lines none
+set -gq menu-border-style "fg=colour240,bg=colour235"
+# --- end scpt.sh ---
+EOF
+  printf '%s\n' "bind-key -T prefix c run-shell \"bash '$SCRIPT' --smart-new-window\"" \
+    "bind-key -T prefix C run-shell \"bash '$SCRIPT' --menu\""
 }
 # Note: ensure_tmux_basics (statusbar/colors) is intentionally NOT auto-applied
 # here. It's only called when scpt creates a brand-new tmux session (i.e. run
@@ -494,16 +592,131 @@ transfer_here() {
   fi
 
   if [ "$probe_rc" = 0 ]; then
-    # Full-pane popup, closes itself when sft exits (-E).
-    tmux display-popup -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null
+    # Full-pane popup, closes itself when sft exits (-E). Disable tmux popup border
+    # so only sft's own rounded border (sft.py) shows — avoids double white border.
+    tmux set-option -g popup-border-lines none 2>/dev/null || true
+    tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+    if tmux display-popup -B -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null; then
+      :
+    else
+      tmux display-popup -E -t "$pane" -w "$pw" -h "$ph" -x "$px" -y "$py" "$qcmd" 2>/dev/null
+    fi
   else
     log_warn "display-popup unavailable (tmux too old, or no attached client), opening transfer in a new window instead: ${probe_err:-no error output}"
     tmux new-window "bash -c '$qcmd; echo; echo \"[sft] done — Enter to close\"; read -r _; exec \${SHELL:-bash}'" 2>/dev/null || exec "${sft_bin[@]}" --from-pane "$pane" --to-pane "$pane"
   fi
 }
 
+# ── picker (prefix+f) — fzf window→pane tree ────────────────────────
+fzf_pane_picker() {
+  require_tmux || { exec "${SHELL:-bash}"; return 1; }
+  if [ -z "${TMUX:-}" ]; then
+    log_error "Not inside tmux — cannot show picker."
+    return 1
+  fi
+  if ! command -v fzf >/dev/null 2>&1; then
+    # Fallback: tmux's native expanded tree (session > window > pane)
+    tmux choose-tree -Zw 2>/dev/null || tmux choose-tree -Z 2>/dev/null || tmux choose-tree 2>/dev/null
+    return 0
+  fi
+  local sep=$'\x1f'
+  local panes_raw
+  panes_raw="$(tmux list-panes -a -F "#{session_name}${sep}#{window_index}${sep}#{window_name}${sep}#{pane_index}${sep}#{pane_id}${sep}#{pane_current_command}${sep}#{pane_current_path}${sep}#{@scpt_remote}${sep}#{pane_active}${sep}#{window_active}${sep}#{pane_title}${sep}#{@scpt_remote_type}" 2>/dev/null)"
+  if [ -z "$panes_raw" ]; then
+    tmux display-message "scpt: no panes" 2>/dev/null
+    return 0
+  fi
+  # Build sortable lines: title|path|type|cmd|pane_id|target (display hides sess:win.pane as requested; use unit-separator so titles containing | are safe)
+  local raw_lines
+  raw_lines="$(printf "%s\n" "$panes_raw" | while IFS=$'\x1f' read -r sess widx wname pidx pid cmd path remote pactive wactive title rtype; do
+    [ -z "$sess" ] && continue
+    local ptype="${rtype:-local}"
+    [ -z "$ptype" ] && ptype="local"
+    local dtitle
+    if [ -n "$title" ] && [ "$title" != "$cmd" ] && [ "$title" != "bash" ] && [ "$title" != "zsh" ]; then
+      dtitle="$title"
+    else
+      dtitle="—"
+    fi
+    local target
+    target="$(printf "%s:%s.%s" "$sess" "$widx" "$pidx")"
+    printf "%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s${sep}%s\n" "$dtitle" "$path" "$ptype" "$cmd" "$pid" "$target" "$sess" "$widx" "$pidx"
+  done | sort -t "$sep" -k7,7 -k8,8n -k9,9n)"
+
+  if [ -z "$raw_lines" ]; then
+    tmux display-message "scpt: no panes to pick" 2>/dev/null
+    return 0
+  fi
+
+  # Colorize for --ansi: title yellow, path dim, type cyan, process green (title may contain spaces, so build directly, no awk split)
+  local cyan=$'\033[36m' yellow=$'\033[33m' green=$'\033[32m' dim=$'\033[2m' reset=$'\033[0m'
+  local colored_lines
+  colored_lines="$(printf "%s\n" "$raw_lines" | while IFS=$'\x1f' read -r dtitle path ptype cmd pid target _sess _widx _pidx; do
+    [ -z "$pid" ] && continue
+    local cdisp
+    cdisp="${yellow}${dtitle}${reset}  ${dim}${path}${reset}  ${cyan}${ptype}${reset}  ${green}${cmd}${reset}"
+    printf "%s\t%s\t%s\n" "$cdisp" "$pid" "$target"
+  done)"
+
+  local sess_cnt win_cnt pane_cnt
+  sess_cnt="$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')"
+  win_cnt="$(tmux list-windows -a 2>/dev/null | wc -l | tr -d ' ')"
+  pane_cnt="$(tmux list-panes -a 2>/dev/null | wc -l | tr -d ' ')"
+
+  local header="Sessions:$sess_cnt  Windows:$win_cnt  Panes:$pane_cnt │ Enter: jump │ Esc: cancel │ Ctrl-/: toggle preview"
+  local preview_cmd='tmux capture-pane -pe -t {2} 2>/dev/null | tail -n 200; echo ""; echo "─── {2} → {3} ───"; tmux display -p -t {2} "#{pane_current_command}  #{pane_current_path}  #{?@scpt_remote,#{@scpt_remote},local}" 2>/dev/null'
+
+  local selected
+  selected="$(printf "%s\n" "$colored_lines" | fzf --ansi --reverse --border=rounded --height 100% --prompt "pane> " --pointer "▶" --marker "✓" --header "$header" --delimiter $'\t' --with-nth 1 --nth 1 --preview "$preview_cmd" --preview-window "right:55%:nowrap" --bind "ctrl-/:toggle-preview,esc:abort" --info inline --layout reverse)"
+  local rc=$?
+  if [ $rc -ne 0 ] || [ -z "$selected" ]; then
+    return 0
+  fi
+  local sel_pid sel_target sel_sess
+  sel_pid="$(printf "%s" "$selected" | cut -f2)"
+  sel_target="$(printf "%s" "$selected" | cut -f3)"
+  sel_sess="$(printf "%s" "$sel_target" | cut -d: -f1)"
+  if [ -z "$sel_pid" ] || [ -z "$sel_target" ]; then
+    return 0
+  fi
+  # Jump: try switch-client first (handles other sessions), then window/pane selects
+  tmux switch-client -t "$sel_sess" 2>/dev/null || true
+  tmux switch-client -t "$sel_target" 2>/dev/null || true
+  tmux select-window -t "$sel_target" 2>/dev/null || true
+  tmux select-pane -t "$sel_pid" 2>/dev/null || true
+  tmux select-pane -t "$sel_pid" 2>/dev/null || true
+}
+
+picker_popup() {
+  require_tmux || return 1
+  if [ -z "${TMUX:-}" ]; then
+    log_error "Not inside tmux — cannot show picker."
+    return 1
+  fi
+  if ! command -v fzf >/dev/null 2>&1; then
+    tmux choose-tree -Zw 2>/dev/null || tmux choose-tree -Z 2>/dev/null || tmux choose-tree 2>/dev/null
+    return 0
+  fi
+  # Probe popup support
+  local probe_rc=0 probe_err=""
+  probe_err="$(tmux display-popup -E -w 1 -h 1 -x C -y C true 2>&1)" || probe_rc=$?
+  if [ "$probe_rc" = 0 ]; then
+    # Disable tmux popup border so only fzf's --border=rounded shows — avoids double white border
+    tmux set-option -g popup-border-lines none 2>/dev/null || true
+    tmux set-option -g popup-border-style "fg=colour240,bg=colour235" 2>/dev/null || true
+    if tmux display-popup -B -E -w 90% -h 80% -x C -y C "bash '$SCRIPT' --picker" 2>/dev/null; then
+      :
+    else
+      tmux display-popup -E -w 90% -h 80% -x C -y C "bash '$SCRIPT' --picker" 2>/dev/null
+    fi
+  else
+    tmux new-window "bash '$SCRIPT' --picker; exec \${SHELL:-bash}" 2>/dev/null || bash "$SCRIPT" --picker
+  fi
+}
+
 # ── the tmux menu (called via prefix+c) ─────────────────────────────
 build_menu() {
+  check_color_support
   require_tmux || { exec "${SHELL:-bash}"; return 1; }
   if [ -z "${TMUX:-}" ]; then
     log_error "Not inside tmux — cannot show menu. Launching tmux..."
@@ -588,14 +801,9 @@ build_menu() {
   local docker_tmp
   docker_tmp="$(list_docker_containers "$docker_ctx")"
   if [ -n "$docker_tmp" ]; then
-    local first_docker=1
     while IFS=$'\t' read -r cname cimage cid; do
       [ -z "$cname" ] && continue
       [ "$i" -gt 9 ] && break # keep menu keys single-digit
-      if [ "$first_docker" -eq 1 ]; then
-        args+=("#[fg=colour245,dim]─ docker containers on $docker_ctx_label ─" "" "")
-        first_docker=0
-      fi
       local dlabel="#[fg=blue]󰡨 #[fg=default]$cname #[fg=colour245,dim]($cimage)"
       args+=("$dlabel" "$i" "$launch \"bash '$SCRIPT' --connect-docker '$cname' '$docker_ctx'\"")
       i=$((i + 1))
@@ -628,6 +836,7 @@ uninstall_binding() {
 }
 
 install_binding() {
+  check_color_support
   require_tmux || return 1
   local force="${1:-}" # --yes to skip prompt, --no to skip binding current server
   if [ -z "${TMUX:-}" ]; then
@@ -638,7 +847,21 @@ install_binding() {
     log_info "Not inside tmux — launching tmux session 'main'..."
     # Ensure a tmux server / session exists (works from outside tmux)
     if ! tmux has-session -t main 2>/dev/null; then
-      tmux new-session -d -s main 2>/dev/null || tmux new-session -d 2>/dev/null || true
+      # Pass CLAUDE_CODE_TMUX_TRUECOLOR via -e (tmux >=3.2) so the FIRST
+      # pane's shell is forked with it already set — `tmux set-environment
+      # -g` in ensure_tmux_basics below only reaches panes/windows created
+      # AFTER it runs, not this initial one. Falls back to no -e on older
+      # tmux (that pane just won't get the var; ensure_tmux_basics still
+      # sets it globally for later panes).
+      local _tc_env=()
+      case "${COLORTERM:-}" in
+        truecolor|24bit) _tc_env=(-e "CLAUDE_CODE_TMUX_TRUECOLOR=1") ;;
+      esac
+      tmux new-session -d -s main "${_tc_env[@]}" 2>/dev/null \
+        || tmux new-session -d -s main 2>/dev/null \
+        || tmux new-session -d "${_tc_env[@]}" 2>/dev/null \
+        || tmux new-session -d 2>/dev/null \
+        || true
     fi
     # New session/server we spun up ourselves — apply statusbar/colors here only.
     ensure_tmux_basics >/dev/null 2>&1 || true
@@ -1141,6 +1364,13 @@ smart_split() { # h or v — called via tmux bind
   ridf="$(tmux display -p "#{@scpt_remote_idf}" 2>/dev/null || echo "")"
   dockerhost="$(tmux display -p "#{@scpt_docker_host}" 2>/dev/null || echo "")"
   [ "$remote" = "" ] && remote=""
+  # Preserve cwd for new pane (local and remote/docker — local cwd before ssh)
+  local cur_path
+  cur_path="$(tmux display -p "#{pane_current_path}" 2>/dev/null || echo "")"
+  local split_c=""
+  if [ -n "$cur_path" ] && [ -d "$cur_path" ]; then
+    split_c="-c \"$cur_path\""
+  fi
   if [ -n "$remote" ] && [ "$rtype" = "docker" ]; then
     # If the container lives on a remote host we got there over ssh, so the
     # local descendant process is ssh, not docker — check accordingly.
@@ -1152,9 +1382,9 @@ smart_split() { # h or v — called via tmux bind
     fi
     if [ "$docker_active" = "1" ]; then
       if [ "$dir" = "h" ]; then
-        tmux split-window -h "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
+        eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
       else
-        tmux split-window -v "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
+        eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-docker '$remote' '$dockerhost'"
       fi
       return 0
     fi
@@ -1162,31 +1392,40 @@ smart_split() { # h or v — called via tmux bind
   if [ -n "$remote" ] && [ -n "$rtype" ] && is_ssh_pane_active; then
     if [ "$rtype" = "alias" ]; then
       if [ "$dir" = "h" ]; then
-        tmux split-window -h "bash '$SCRIPT' --connect '$remote'"
+        eval tmux split-window -h $split_c "bash '$SCRIPT' --connect '$remote'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect '$remote'"
       else
-        tmux split-window -v "bash '$SCRIPT' --connect '$remote'"
+        eval tmux split-window -v $split_c "bash '$SCRIPT' --connect '$remote'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect '$remote'"
       fi
     else
       local usr hn
       usr="${remote%%@*}"; hn="${remote#*@}"
       if [ -n "$ridf" ]; then
         if [ "$dir" = "h" ]; then
-          tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
+          eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
         else
-          tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
+          eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr' '$ridf'"
         fi
       else
         if [ "$dir" = "h" ]; then
-          tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
+          eval tmux split-window -h $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'" 2>/dev/null || tmux split-window -h "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
         else
-          tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
+          eval tmux split-window -v $split_c "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'" 2>/dev/null || tmux split-window -v "bash '$SCRIPT' --connect-ephemeral '$hn' '$usr'"
         fi
       fi
     fi
     return 0
   fi
-  if [ "$dir" = "h" ]; then tmux split-window -h
-  else tmux split-window -v
+  # Local pane — preserve cwd
+  if [ -n "$split_c" ]; then
+    if [ "$dir" = "h" ]; then
+      eval tmux split-window -h $split_c 2>/dev/null || tmux split-window -h
+    else
+      eval tmux split-window -v $split_c 2>/dev/null || tmux split-window -v
+    fi
+  else
+    if [ "$dir" = "h" ]; then tmux split-window -h
+    else tmux split-window -v
+    fi
   fi
 }
 
@@ -1222,7 +1461,9 @@ smart_new_window() {
     fi
     return 0
   fi
-  build_menu
+  # Not an active ssh/docker pane (plain local shell) — show the menu.
+  # Falls back to a plain local window if the menu can't be displayed.
+  build_menu || tmux new-window
 }
 
 install_smart_splits() {
@@ -1241,6 +1482,16 @@ install_smart_splits() {
   tmux bind-key -T prefix T run-shell "bash '$SCRIPT' --transfer-here" 2>/dev/null || true
   # prefix+R reload: reconnect the current pane in place if its connection dropped
   tmux bind-key -T prefix R run-shell "bash '$SCRIPT' --reload-pane" 2>/dev/null || true
+  # prefix+f picker: fzf window→pane tree (falls back to choose-tree if fzf missing)
+  tmux bind-key -T prefix f run-shell "bash '$SCRIPT' --picker-popup" 2>/dev/null || true
+  # Right-click: copy if tmux selection present, but ignore panes where
+  # the app handles its own mouse/clipboard (claude/opencode/gemini/nvim + mouse_any_flag)
+  # to avoid double/triple copy (3x in CC, 2x in OC). Otherwise show menu.
+  tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
+  tmux bind-key -T root MouseUp3Pane if-shell -F "#{&&:#{selection_present},#{?#{||:#{mouse_any_flag},#{||:#{==:#{pane_current_command},claude},#{||:#{==:#{pane_current_command},opencode},#{||:#{==:#{pane_current_command},gemini},#{==:#{pane_current_command},nvim}}}}},0,1}}" \
+    "send-keys -X copy-pipe-and-cancel" \
+    "display-menu -t= -x M -y M -T \"#[align=centre]Pane\" \"Paste\" p \"paste-buffer\" \"\" \"Split Horizontal\" h \"split-window -h\" \"Split Vertical\" v \"split-window -v\" \"\" \"#{?window_zoomed_flag,Unzoom,Zoom}\" z \"resize-pane -Z\" \"Kill Pane\" x \"kill-pane\"" \
+    2>/dev/null || true
 }
 
 uninstall_smart_splits() {
@@ -1251,8 +1502,15 @@ uninstall_smart_splits() {
   tmux unbind-key -T prefix '_' 2>/dev/null || true
   tmux unbind-key -T prefix T 2>/dev/null || true
   tmux unbind-key -T prefix R 2>/dev/null || true
+  tmux unbind-key -T prefix f 2>/dev/null || true
+  tmux unbind-key -T root MouseDown3Pane 2>/dev/null || true
+  tmux unbind-key -T root MouseUp3Pane 2>/dev/null || true
   tmux bind-key -T prefix % split-window -h 2>/dev/null || true
   tmux bind-key -T prefix '"' split-window -v 2>/dev/null || true
+  tmux bind-key -T prefix f command-prompt "find-window -Z -- '%%'" 2>/dev/null || true
+  # Approximate tmux's compiled-in default (its exact context menu is long
+  # and version-dependent) — plain select, no custom menu/paste override.
+  tmux bind-key -T root MouseDown3Pane select-pane -t = 2>/dev/null || true
 }
 
 # ── adding a host ────────────────────────────────────────────────────
@@ -1500,6 +1758,8 @@ scan_network() {
 case "${1:-}" in
 --menu) build_menu "${2:-window}" ;;
 --transfer-here) transfer_here ;;
+--picker) fzf_pane_picker ;;
+--picker-popup) picker_popup ;;
 --list|-l|--remotes) list_all ;;
 --connect) connect "${2:-}" ;;
 --connect-ephemeral) connect_ephemeral "${2:-}" "${3:-}" "${4:-}" "${5:-0}" ;;
@@ -1521,6 +1781,7 @@ case "${1:-}" in
   ensure_tmux_basics
   log_ok "Applied statusbar/colors to this tmux server."
   ;;
+--persist) print_persist_config ;;
 --yes|--force) install_binding --yes ;;
 --no|--no-bind) install_binding --no ;;
 --help|-h)
@@ -1535,6 +1796,7 @@ case "${1:-}" in
   echo -e "  ${C_CYAN}--bind${C_RESET}      Install ${C_BOLD}prefix+c${C_RESET} smart + ${C_BOLD}prefix+T${C_RESET} transfer + ${C_BOLD}prefix+R${C_RESET} reload + ${C_BOLD}prefix+% / prefix+\"${C_RESET} multiplex ${C_DIM}(ssh pane→new ssh pane via ControlMaster)${C_RESET}"
   echo -e "  ${C_CYAN}--unbind${C_RESET}    Restore ${C_BOLD}prefix+c/T/R/%/|/_/\"${C_RESET} to defaults"
   echo -e "  ${C_CYAN}--basics${C_RESET}    Apply statusbar/colors/mouse etc to the ${C_BOLD}current${C_RESET} tmux server ${C_DIM}(must be run inside tmux)${C_RESET}"
+  echo -e "  ${C_CYAN}--persist${C_RESET}   Print the ${C_BOLD}--basics${C_RESET} config as plain tmux.conf lines ${C_DIM}(scpt itself never writes to ~/.tmux.conf — redirect yourself: --persist >> ~/.tmux.conf)${C_RESET}"
   echo -e "  ${C_CYAN}--help${C_RESET}      Show this help"
   echo ""
   echo -e "${C_DIM}Choose a host for a new split: prefix+| side by side, prefix+_ top/bottom.${C_RESET}"
